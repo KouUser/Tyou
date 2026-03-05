@@ -62,6 +62,24 @@
       "bundle": "ui"
     },
     {
+      "name": "TestUI3",
+      "path": "TestUI3",
+      "type": "Prefab",
+      "bundle": "ui"
+    },
+    {
+      "name": "TestUI4",
+      "path": "TestUI4",
+      "type": "Prefab",
+      "bundle": "ui"
+    },
+    {
+      "name": "TestUI5",
+      "path": "TestUI5",
+      "type": "Prefab",
+      "bundle": "ui"
+    },
+    {
       "name": "TipUI",
       "path": "TipUI",
       "type": "Prefab",

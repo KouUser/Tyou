@@ -361,7 +361,8 @@ tyou.ui.select({ title: "提示", content: "是否确定退出？" });
     "mp3": "AudioClip",
     "plist": "SpriteAtlas",
     "skel": "sp.SkeletonData",
-    "bin": "BufferAsset"
+    "bin": "BufferAsset",
+    "text": "TextAsset"
   },
   "specialMarks": {
     "preload": ["P_", "p_"]
@@ -385,13 +386,19 @@ tyou.ui.select({ title: "提示", content: "是否确定退出？" });
 
 > 文件名以 `P_` 或 `p_` 开头的资源会自动标记为 `preload`，可在启动时预加载。
 
-#### 二进制文件（.bin）索引
+#### 二进制文件（.bin）、文本文件（.text）与 JSON 文件（.json）索引
 
-`resourceTypeMap` 中配置 `"bin": "BufferAsset"` 后，资源索引会自动收录 `.bin` 文件。这适用于需要自定义解析规则的二进制数据（如自定义协议、加密数据、非 Luban 格式的二进制配置等）。
+`resourceTypeMap` 中配置了以下特殊文件类型的映射：
 
-**Luban 生成的 `.bin` 文件不会被索引：** `config` Bundle 配置在 `directoryBundles` 中，只索引一级子目录名称，不扫描其中的具体文件。Luban 配置表的加载由 `TableModule` 统一处理，无需经过资源索引。
+| 扩展名 | Cocos 类型 | 用途 |
+|--------|-----------|------|
+| `.bin` | `BufferAsset` | 自定义二进制数据（协议、加密数据等） |
+| `.text` | `TextAsset` | 纯文本数据文件（配置、模板、脚本等） |
+| `.json` | `JsonAsset` | JSON 结构化数据 |
 
-> 如果需要在其他 Bundle 中放置自定义 `.bin` 文件，确保该 Bundle 不在 `directoryBundles` 中，即可被自动索引。
+**Luban 生成的配置文件不会被索引：** `config` Bundle 配置在 `directoryBundles` 中，只索引一级子目录名称，不扫描其中的具体文件。Luban 配置表的加载由 `TableModule` 统一处理，无需经过资源索引。
+
+> 如果需要在其他 Bundle 中放置自定义 `.bin`、`.text` 或 `.json` 文件，确保该 Bundle 不在 `directoryBundles` 中，即可被自动索引。
 
 #### 索引输出位置
 

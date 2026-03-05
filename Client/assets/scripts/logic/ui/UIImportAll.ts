@@ -8,7 +8,3 @@
 import "./TestUI";
 import "./MessageBoxUI";
 import "./TestUI1";
-import "./TestUI2";
-import "./TestUI3";
-import "./TestUI4";
-import "./TestUI5";

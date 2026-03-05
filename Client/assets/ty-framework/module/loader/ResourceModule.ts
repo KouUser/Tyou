@@ -3,6 +3,7 @@ import {
     Asset,
     AssetManager,
     AudioClip,
+    BufferAsset,
     Font,
     instantiate,
     JsonAsset,
@@ -55,6 +56,7 @@ export class ResourceModule extends Module {
         this._typeMap.set("AnimationClip", AnimationClip);
         this._typeMap.set("Scene", SceneAsset);
         this._typeMap.set("sp.SkeletonData", sp.SkeletonData);
+        this._typeMap.set("BufferAsset", BufferAsset);
         this._loader = new LoaderManager.Loader();
 
         // 初始化延迟释放配置

@@ -16,7 +16,8 @@
     "anim": "AnimationClip",
     "scene": "Scene",
     "skel": "sp.SkeletonData",
-    "bin": "BufferAsset"
+    "bin": "BufferAsset",
+    "text": "TextAsset"
   },
   "specialMarks": {
     "preload": ["P_", "p_"]

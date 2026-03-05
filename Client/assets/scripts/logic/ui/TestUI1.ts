@@ -19,7 +19,7 @@ export class TestUI1 extends UIWindow {
     //#endregion
 
     private onBtnEnterClick(btn: Node, param: any) {
-        tyou.ui.showUIAsync(UIName.TestUI2);
+       // tyou.ui.showUIAsync(UIName.TestUI2);
     }
 
     override onCreate() {
