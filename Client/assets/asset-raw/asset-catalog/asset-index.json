@@ -15,13 +15,13 @@
   "assets": [
     {
       "name": "BGM_Main",
-      "path": "p-bgm/BGM_Main",
+      "path": "BGM_Main",
       "type": "AudioClip",
       "bundle": "audio"
     },
     {
       "name": "btn_click",
-      "path": "ui/btn_click",
+      "path": "btn_click",
       "type": "AudioClip",
       "bundle": "audio"
     },
@@ -52,30 +52,6 @@
     {
       "name": "TestUI1",
       "path": "TestUI1",
-      "type": "Prefab",
-      "bundle": "ui"
-    },
-    {
-      "name": "TestUI2",
-      "path": "TestUI2",
-      "type": "Prefab",
-      "bundle": "ui"
-    },
-    {
-      "name": "TestUI3",
-      "path": "TestUI3",
-      "type": "Prefab",
-      "bundle": "ui"
-    },
-    {
-      "name": "TestUI4",
-      "path": "TestUI4",
-      "type": "Prefab",
-      "bundle": "ui"
-    },
-    {
-      "name": "TestUI5",
-      "path": "TestUI5",
       "type": "Prefab",
       "bundle": "ui"
     },
