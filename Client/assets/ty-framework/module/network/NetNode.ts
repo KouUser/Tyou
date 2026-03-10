@@ -230,22 +230,11 @@ export class NetNode {
             var a = new Uint8Array(msg)
             let packet: Object = JSON.parse(this.Utf8ArrayToStr(a))
         } else {
-            if(WECHAT){
-                const uint8Arr: any = new Uint8Array(msg);
-                const encodedString: any = String.fromCharCode.apply(null, uint8Arr);
-                const decodedString = decodeURIComponent(escape(encodedString));
-                let packet: Object = JSON.parse(decodedString);
-                callback(packet);
-            }else{
-                var fileReader = new FileReader();
-                fileReader.onload = function (progressEvent) {
-                    var arrayBuffer: ArrayBuffer = this.result as ArrayBuffer;//arrayBuffer即为blob对应的arrayBuffer  
-                    var a = new Uint8Array(arrayBuffer)
-                    let packet: Object = JSON.parse(self.Utf8ArrayToStr(a))
-                    callback(packet);
-                };
-                fileReader.readAsArrayBuffer(msg);
-            }
+            const uint8Arr: any = new Uint8Array(msg);
+            const encodedString: any = String.fromCharCode.apply(null, uint8Arr);
+            const decodedString = decodeURIComponent(escape(encodedString));
+            let packet: Object = JSON.parse(decodedString);
+            callback(packet);
         }
     }
 

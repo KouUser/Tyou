@@ -139,7 +139,7 @@ export class AsyncUtils {
         }
 
         return new Promise((resolve, reject) => {
-            let intervalId: number | null = null;
+            let intervalId: ReturnType<typeof setInterval> | null = null;
             let frameId: number | null = null;
 
             const check = () => {

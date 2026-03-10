@@ -166,4 +166,11 @@ export class PoolModule extends Module {
         this._nodePool?.onUpdate(dt);
         this._classPool?.onUpdate(dt);
     }
+
+    /**
+     * 获取所有 Node 池的状态（调试用）
+     */
+    public getAllNodePoolStatus(): Array<{ poolName: string; assetPath: string; status: any }> {
+        return this._nodePool?.getAllPoolStatus() ?? [];
+    }
 }

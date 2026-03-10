@@ -138,7 +138,20 @@ export class UIModule extends Module {
         );
         this.pushWindow(window);
         this._windowInstances.set(type, window);
-        await window.baseLoad(windowName, this.onWindowPrepare.bind(this), ...args);
+
+        try {
+            await window.baseLoad(windowName, this.onWindowPrepare.bind(this), ...args);
+        } catch (e) {
+            console.error(`[UIModule] Failed to load window "${windowName}":`, e);
+            // 加载失败时清理：从栈和实例表中移除，防止残留状态
+            this.popWindow(window);
+            this._windowInstances.delete(type);
+            this.onSortWindowDepth(window.windowLayer);
+            this.onSetWindowVisible();
+            this.refreshBlurBg().then();
+            return null;
+        }
+
         return window;
     }
 
@@ -193,6 +206,11 @@ export class UIModule extends Module {
     /** 获取窗口实例 */
     public getWindow(wnd: string): UIWindow | null {
         return this._windowInstances.get(wnd) || null;
+    }
+
+    /** 获取当前窗口栈大小 */
+    public getWindowCount(): number {
+        return this._windowInstances.size;
     }
 
     /** 检查窗口是否存在 */

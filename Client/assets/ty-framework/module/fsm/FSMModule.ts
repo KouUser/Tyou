@@ -73,6 +73,16 @@ export class FSM<T extends string | number> {
         return null;
     }
 
+    /** waitUntil 超时时间（秒），默认 10 秒。设为 0 表示不限时 */
+    public waitUntilTimeout: number = 10;
+
+    // 超时等待内部状态
+    private _waitResolve: ((value: boolean) => void) | null = null;
+    private _waitCondition: (() => boolean) | null = null;
+    private _waitElapsed: number = 0;
+    private _waitTimeout: number = 0;
+    private _waitDesc: string = '';
+
     /**
      * 切换状态
      */
@@ -91,8 +101,15 @@ export class FSM<T extends string | number> {
         if (this._currentState !== null) {
             const currentStateObj = this._states.get(this._currentState);
             if (currentStateObj) {
-                //这里有可能多地方调用导致 异部enter还没执行完 
-                await Unitask.waitUntil(() => currentStateObj.isEntered);
+                //这里有可能多地方调用导致 异部enter还没执行完
+                const entered = await this._waitUntilWithTimeout(
+                    () => currentStateObj.isEntered,
+                    this.waitUntilTimeout,
+                    `等待状态 ${this._currentState} onEnter 完成`
+                );
+                if (!entered) {
+                    console.error(`[FSM:${this._id}] 等待状态 ${this._currentState} onEnter 超时(${this.waitUntilTimeout}s)，强制切换到 ${newState}`);
+                }
                 await currentStateObj.onExit(newState);
             }
             this._previousState = this._currentState;
@@ -107,9 +124,60 @@ export class FSM<T extends string | number> {
     }
 
     /**
+     * 带超时的条件等待，基于帧驱动计时（不依赖 setTimeout/requestAnimationFrame）
+     * 超时返回 false 而不是永久阻塞
+     */
+    private _waitUntilWithTimeout(condition: () => boolean, timeout: number, desc?: string): Promise<boolean> {
+        if (condition()) return Promise.resolve(true);
+        if (timeout <= 0) {
+            return Unitask.waitUntil(condition).then(() => true);
+        }
+        return new Promise<boolean>((resolve) => {
+            this._waitResolve = resolve;
+            this._waitCondition = condition;
+            this._waitElapsed = 0;
+            this._waitTimeout = timeout;
+            this._waitDesc = desc || '';
+        });
+    }
+
+    /**
+     * 驱动超时等待检查（由 update 每帧调用）
+     */
+    private _tickWait(dt: number): void {
+        if (!this._waitResolve) return;
+
+        if (this._waitCondition!()) {
+            const resolve = this._waitResolve;
+            this._clearWait();
+            resolve(true);
+            return;
+        }
+
+        this._waitElapsed += dt;
+        if (this._waitElapsed >= this._waitTimeout) {
+            console.warn(`[FSM:${this._id}] waitUntil 超时: ${this._waitDesc}`);
+            const resolve = this._waitResolve;
+            this._clearWait();
+            resolve(false);
+        }
+    }
+
+    private _clearWait(): void {
+        this._waitResolve = null;
+        this._waitCondition = null;
+        this._waitElapsed = 0;
+        this._waitTimeout = 0;
+        this._waitDesc = '';
+    }
+
+    /**
      * 更新当前状态
      */
     public update(dt: number): void {
+        // 驱动超时等待检查
+        this._tickWait(dt);
+
         if (!this._isActive || this._currentState === null) {
             return;
         }
@@ -166,6 +234,13 @@ export class FSM<T extends string | number> {
      * 销毁状态机
      */
     public destroy(): void {
+        // 取消等待中的超时
+        if (this._waitResolve) {
+            const resolve = this._waitResolve;
+            this._clearWait();
+            resolve(false);
+        }
+
         if (this._currentState !== null) {
             const currentStateObj = this._states.get(this._currentState);
             if (currentStateObj) {

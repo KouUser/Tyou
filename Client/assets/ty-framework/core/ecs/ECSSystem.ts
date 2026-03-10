@@ -184,8 +184,12 @@ export class ECSRootSystem {
 
     execute(dt: number) {
         for (let i = 0; i < this.systemCnt; i++) {
-            // @ts-ignore
-            this.executeSystemFlows[i].execute(dt);
+            try {
+                // @ts-ignore
+                this.executeSystemFlows[i].execute(dt);
+            } catch (e) {
+                console.error(`[ECS] System execute error (index ${i}):`, e);
+            }
         }
     }
 
