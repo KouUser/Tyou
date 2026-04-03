@@ -1,15 +1,10 @@
 {
   "bundles": [
-    "actor",
-    "anim",
     "atlas",
     "audio",
     "config",
-    "effect",
-    "font",
     "raw",
     "scene",
-    "spine",
     "ui"
   ],
   "assets": [

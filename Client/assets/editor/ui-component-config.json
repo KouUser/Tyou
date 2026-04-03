@@ -3,7 +3,7 @@
     {"prefix": "m_go", "component": "Node"},
     {"prefix": "m_tf", "component": "UITransform"},
     {"prefix": "m_text", "component": "Label"},
-    {"prefix": "m_btn", "component": "Node"},
+    {"prefix": "m_btn", "component": "Button", "codeType": "Node"},
     {"prefix": "m_img", "component": "Sprite"},
     {"prefix": "m_grid", "component": "Layout"},
     {"prefix": "m_list", "component": "ListView"},
