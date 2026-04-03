@@ -704,15 +704,76 @@ async function showSuccess(title, message) {
     });
 }
 
+// ===========================
+// 前缀检查：自动修正组件
+// ===========================
+async function checkPrefixComponents(nodeUuid) {
+    try {
+        let uuid = nodeUuid;
+        if (!uuid) {
+            const uuids = Editor.Selection.getSelected('node');
+            if (!uuids || uuids.length === 0) {
+                await showWarning('请先选中一个节点');
+                return;
+            }
+            uuid = uuids[0];
+        }
+
+        // 读取组件配置
+        const componentConfig = loadComponentConfig();
+
+        // 调用场景脚本
+        const result = await Editor.Message.request('scene', 'execute-scene-script', {
+            name: 'uitscreate',
+            method: 'checkPrefixes',
+            args: [uuid, JSON.stringify(componentConfig)],
+        });
+
+        if (!result) {
+            await showWarning('检查失败，场景脚本未返回结果');
+            return;
+        }
+
+        let msg = `检查完成！\n\n`;
+        msg += `扫描节点: ${result.total}\n`;
+        msg += `添加组件: ${result.fixed}\n`;
+        msg += `移除冲突: ${result.removed}\n`;
+        msg += `无需修改: ${result.skipped}\n`;
+        if (result.details && result.details.length > 0) {
+            msg += `\n操作详情:\n` + result.details.join('\n');
+        }
+
+        if (result.fixed > 0 || result.removed > 0) {
+            await showSuccess('前缀检查完成', msg);
+        } else {
+            await Editor.Dialog.info('提示', {
+                title: '前缀检查完成',
+                detail: msg,
+                buttons: ['确定'],
+            });
+        }
+    } catch (e) {
+        console.error('[UI脚本生成器] 前缀检查失败:', e);
+        await showErrorMessage('检查失败', e.message || String(e));
+    }
+}
+
 // 导出函数
 module.exports = {
     onHierarchyMenu: function(assetInfo) {
-        return [{
-            label: '🎯 生成UI脚本',
-            async click() {
-                // assetInfo 即为右键点击的节点 uuid，直接传入避免依赖 Selection API
-                await generateUIScript(assetInfo);
+        return [
+            {
+                label: '🎯 生成UI脚本',
+                async click() {
+                    await generateUIScript(assetInfo);
+                }
+            },
+            {
+                label: '🔍 检查前缀组件',
+                async click() {
+                    await checkPrefixComponents(assetInfo);
+                }
             }
-        }];
+        ];
     }
 };

@@ -1,16 +1,14 @@
 {
-  "$schema": "./@types/schema/package/index.json",
   "package_version": 2,
-  "name": "uitscreate",
+  "name": "psd2ccc",
   "version": "1.0.0",
-  "author": "Cocos Creator",
+  "author": "PSD2CCC",
   "editor": ">=3.8.7",
   "scripts": {
-    "preinstall": "node ./scripts/preinstall.js",
     "build": "tsc",
     "watch": "tsc -w"
   },
-  "description": "自定义预制体右键菜单",
+  "description": "从PSD导出的JSON生成Cocos Creator UI节点树",
   "main": "./dist/main.js",
   "devDependencies": {
     "@cocos/creator-types": "^3.8.7",
@@ -19,12 +17,12 @@
   },
   "contributions": {
     "scene": {
-      "script": "./dist/prefix-checker-scene.js"
+      "script": "./dist/scene-walker.js"
     },
-    "hierarchy": {
+    "assets": {
       "menu": {
-        "methods": "./dist/hierarchy-menu.js",
-        "createMenu": "onHierarchyMenu"
+        "methods": "./dist/assets-menu.js",
+        "assetMenu": "onAssetMenu"
       }
     }
   }
