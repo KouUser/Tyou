@@ -484,6 +484,9 @@ function filterNodesByConfig(nodes, config) {
 
         for (const cfg of config) {
             if (nodeName.startsWith(cfg.prefix)) {
+                // 代码生成使用 codeType（如果存在），否则使用 component
+                const codeType = cfg.codeType || cfg.component;
+
                 // 生成属性名（去掉m_，前面加_）
                 const prefixIndex = cfg.prefix.indexOf('_');
                 const propertyName = '_' + nodeName.substring(prefixIndex + 1);
@@ -502,7 +505,7 @@ function filterNodesByConfig(nodes, config) {
                 properties.push({
                     originalName: nodeName,
                     propertyName: propertyName,
-                    componentType: cfg.component,
+                    componentType: codeType,
                     prefix: cfg.prefix,
                     methodName: methodName
                 });
@@ -705,7 +708,7 @@ async function showSuccess(title, message) {
 }
 
 // ===========================
-// 前缀检查：自动修正组件
+// 前缀检查：自动修正组件（两阶段）
 // ===========================
 async function checkPrefixComponents(nodeUuid) {
     try {
@@ -722,28 +725,91 @@ async function checkPrefixComponents(nodeUuid) {
         // 读取组件配置
         const componentConfig = loadComponentConfig();
 
-        // 调用场景脚本
-        const result = await Editor.Message.request('scene', 'execute-scene-script', {
+        // ======== 阶段 1：移除互斥组件 + 直接添加无冲突组件 ========
+        const phase1Result = await Editor.Message.request('scene', 'execute-scene-script', {
             name: 'uitscreate',
-            method: 'checkPrefixes',
+            method: 'checkPrefixes_phase1',
             args: [uuid, JSON.stringify(componentConfig)],
         });
 
-        if (!result) {
+        if (!phase1Result) {
             await showWarning('检查失败，场景脚本未返回结果');
             return;
         }
 
-        let msg = `检查完成！\n\n`;
-        msg += `扫描节点: ${result.total}\n`;
-        msg += `添加组件: ${result.fixed}\n`;
-        msg += `移除冲突: ${result.removed}\n`;
-        msg += `无需修改: ${result.skipped}\n`;
-        if (result.details && result.details.length > 0) {
-            msg += `\n操作详情:\n` + result.details.join('\n');
+        let allDetails = phase1Result.details ? [...phase1Result.details] : [];
+        let totalFixed = phase1Result.fixed || 0;
+        let totalRemoved = phase1Result.removed || 0;
+        let totalSkipped = phase1Result.skipped || 0;
+        let totalFailed = 0;
+
+        // ======== 阶段 2：等待刷新后添加因互斥而推迟的组件 ========
+        if (phase1Result.needsPhase2 && phase1Result.pendingAdds && phase1Result.pendingAdds.length > 0) {
+            allDetails.push('');
+            allDetails.push('--- 等待引擎刷新后执行阶段 2 ---');
+
+            // 等待 800ms 让引擎完成组件移除的刷新（需要足够时间让场景进程 tick）
+            await new Promise(resolve => setTimeout(resolve, 800));
+
+            const phase2Result = await Editor.Message.request('scene', 'execute-scene-script', {
+                name: 'uitscreate',
+                method: 'checkPrefixes_phase2',
+                args: [JSON.stringify(phase1Result.pendingAdds)],
+            });
+
+            if (phase2Result) {
+                totalFixed += phase2Result.fixed || 0;
+                totalFailed += phase2Result.failed || 0;
+                if (phase2Result.details) {
+                    allDetails = allDetails.concat(phase2Result.details);
+                }
+            }
+
+            // 如果 phase2 仍有失败，再重试一次（等待更长时间）
+            if (phase2Result && phase2Result.failed > 0) {
+                allDetails.push('');
+                allDetails.push('--- 部分组件添加失败，等待后重试 ---');
+
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+                // 收集失败的项重试
+                const retryAdds = phase1Result.pendingAdds.filter(item => {
+                    // 检查 phase2 的 details 中是否有该节点的失败记录
+                    return phase2Result.details.some(d => d.includes(item.name) && d.includes('失败'));
+                });
+
+                if (retryAdds.length > 0) {
+                    const retryResult = await Editor.Message.request('scene', 'execute-scene-script', {
+                        name: 'uitscreate',
+                        method: 'checkPrefixes_phase2',
+                        args: [JSON.stringify(retryAdds)],
+                    });
+
+                    if (retryResult) {
+                        totalFixed += retryResult.fixed || 0;
+                        totalFailed = Math.max(0, totalFailed - (retryResult.fixed || 0));
+                        if (retryResult.details) {
+                            allDetails = allDetails.concat(retryResult.details);
+                        }
+                    }
+                }
+            }
         }
 
-        if (result.fixed > 0 || result.removed > 0) {
+        // ======== 输出结果 ========
+        let msg = `检查完成！\n\n`;
+        msg += `扫描节点: ${phase1Result.total}\n`;
+        msg += `添加组件: ${totalFixed}\n`;
+        msg += `移除冲突: ${totalRemoved}\n`;
+        msg += `无需修改: ${totalSkipped}\n`;
+        if (totalFailed > 0) {
+            msg += `添加失败: ${totalFailed}\n`;
+        }
+        if (allDetails.length > 0) {
+            msg += `\n操作详情:\n` + allDetails.join('\n');
+        }
+
+        if (totalFixed > 0 || totalRemoved > 0) {
             await showSuccess('前缀检查完成', msg);
         } else {
             await Editor.Dialog.info('提示', {

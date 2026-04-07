@@ -2,9 +2,11 @@
 
 CocosCreator 3.8.7 基础框架，比较适合 Unity 初转型 CCC 的使用者。参考了 **TEngine** 等开源框架。
 （如果对你有帮助，给个star就好了。）
+（有问题反馈 qq 499793702  TEngine技术群 862987645）
 
 ## 特性概览
 
+- **PSD → UI 全流程** — PSD 切图导出 → 生成节点树 → 前缀命名 → 自动检查组件 → 一键生成代码
 - **全局单例架构** — 所有模块通过 `tyou.*` 全局访问，无需频繁 `getComponent`
 - **UI 模块** — 栈式管理 + 层级系统 + 模糊背景 + 右键一键生成 UI 代码
 - **资源模块** — 资源索引 + 自动引用计数 + 延迟释放 + Bundle 自动发现
@@ -59,6 +61,163 @@ tyou.game     // GameWorld（服务器时间同步等）
 Log           // 全局日志（globalThis.Log）
 Unitask       // 全局异步工具（globalThis.Unitask）
 ```
+
+---
+
+## PSD → UI 全流程产线 
+
+为了防止美术和策划再因为psd工作流增加多余工作量而扯皮，框架提供了一套完整的仅供程序使用的减轻拼UI工作量的 **从 PSD 设计稿到可运行 UI 代码** 的自动化流水线，中间只需人工介入“调键点/改前缀”一步（暂不支持九宫格切割等细微优化也需要手工调整一下）：
+
+```
+PSD 设计稿
+  │  ① 在 Photoshop 中打开 PSD，运行 Psd2CCC-Digest.jsx 脚本
+  │     → 自动切图导出 PNG + 生成节点结构 JSON
+  ▼
+导入 Cocos Creator
+  │  ② 在资源管理器中右键 JSON 文件 → 「📐 PSD生成UI」
+  │     → 自动在 Canvas 下生成完整节点树（位置/尺寸/精灵帧自动绑定）
+  ▼
+手动调整
+  │  ③ 调整键点、布局、按命名规范改前缀（m_btn、m_text、m_img 等）
+  ▼
+检查前缀组件
+  │  ④ 在层级管理器中右键根节点 → 「🔍 检查前缀组件」
+  │     → 自动检查所有子节点，移除互斥组件，添加正确组件
+  ▼
+生成 UI 代码
+  │  ⑤ 右键根节点 → 「🎯 生成UI脚本」
+  │     → 自动生成 TypeScript 类（属性绑定 + 事件注册）
+  │     → 自动更新 UIName.ts 和 UIImportAll.ts
+  ▼
+✅ 可运行的 UI 界面
+```
+
+---
+
+### PSD 切图导出（Psd2CCC-Digest）
+
+#### 脚本位置
+
+Photoshop 脚本位于项目中：
+
+```
+Client/assets/asset-art/psd/tool/Psd2CCC-Digest.jsx
+```
+
+使用前需将此文件 **复制到 Photoshop 的 Scripts 目录**，便于通过菜单快速调用：
+
+| 系统 | Photoshop Scripts 目录 |
+|------|-------------------------|
+| Windows | `C:\Program Files\Adobe\Adobe Photoshop <版本>\Presets\Scripts\` |
+| macOS | `/Applications/Adobe Photoshop <版本>/Presets/Scripts/` |
+
+复制后重启 Photoshop，即可在菜单栏 `文件 → 脚本` 中看到 `Psd2CCC-Digest`。
+
+> 也可不复制，直接通过 `文件 → 脚本 → 浏览` 手动选择项目中的 `.jsx` 文件运行。
+
+#### 环境要求
+
+- Adobe Photoshop **CC 2018+**
+- PSD 文件放在 `Client/assets/asset-art/psd/` 目录下
+
+#### 使用步骤
+
+1. 在 Photoshop 中打开位于 `assets/asset-art/psd/` 目录下的 PSD 文件
+2. 运行脚本：`文件 → 脚本 → Psd2CCC-Digest`（或浏览选择 `.jsx`）
+3. 脚本自动执行以下操作：
+   - **栈格化**智能对象/形状/填充层（自动恢复，不修改 PSD）
+   - **导出 PNG** → `Client/assets/asset-raw/ui-raw/atlas/{psdName}/`
+   - **生成结构 JSON** → `Client/assets/asset-art/psd/tool/{psdName}/{psdName}-structure.json`
+   - 文字层自动识别为 `text` 节点（保留字体/字号/颜色）
+   - 重复图层自动去重（相同像素只导出一次，多个节点共用引用）
+   - 中文图层名自动转拼音首字母（避免文件名乱码）
+4. 导出完成后显示统计信息（PNG 数量、文字数量、去重数量、输出路径）
+
+#### 输出目录说明
+
+| 输出内容 | 路径 | 说明 |
+|---------|------|------|
+| 切图 PNG | `assets/asset-raw/ui-raw/atlas/{psdName}/` | 按 PSD 名称分目录，Cocos 可直接使用 |
+| 结构 JSON | `assets/asset-art/psd/tool/{psdName}/{psdName}-structure.json` | 记录节点树结构、位置、尺寸、类型 |
+
+#### PSD 图层规范
+
+- **可见图层** 才会被导出，隐藏图层自动跳过
+- **组（LayerSet）** 会生成对应的父节点，保留层级结构
+- **文字层** 自动识别为 text 节点，保留字体、字号、颜色信息
+- **调整层**（亮度/对比度等）自动跳过
+
+---
+
+### 导入 Cocos Creator（psd2ccc 扩展）
+
+PSD 切图完成后，在 CocosCreator 中通过 `psd2ccc` 编辑器扩展将 JSON 结构生成为场景节点树：
+
+1. 在 Cocos Creator 的 **资源管理器** 中找到生成的 `{psdName}-structure.json` 文件
+2. **右键** 该 JSON 文件
+3. 点击 **「📐 PSD生成UI」**
+4. 扩展自动执行：
+   - 解析 JSON 中的节点树结构
+   - 找到场景中的 Canvas 节点
+   - 在 Canvas 下创建 UI 根节点（带 Widget 全屏适配）
+   - 递归创建所有子节点，自动设置：
+     - UITransform（尺寸）
+     - 位置（PSD 绝对坐标 → Cocos 相对坐标自动转换）
+     - Sprite 组件 + SpriteFrame 引用（图片层）
+     - Label 组件 + 文字内容/字号/颜色（文字层）
+   - PSD 图层顺序自动映射为 Cocos 渲染顺序
+5. 完成后弹出统计信息
+
+> 坐标转换说明：PSD 原点在左上角、Y 轴向下；Cocos 原点在父节点锚点（默认中心）、Y 轴向上。扩展自动完成转换。
+
+---
+
+### 检查前缀组件（自动修正）
+
+节点命名前缀确定后，通过 **「🔍 检查前缀组件」** 右键菜单自动检查并修正所有子节点的组件：
+
+#### 使用方式
+
+1. 在层级管理器中右键点击 UI 根节点
+2. 选择 **「🔍 检查前缀组件」**
+3. 扩展自动扫描所有子节点，按前缀规则执行：
+
+#### 检查规则
+
+| 前缀 | 检查规则 | 互斥处理 |
+|------|---------|----------|
+| `m_go` | 只要是 Node 即可，无需额外组件 | 无 |
+| `m_tf` | 必须包含 `UITransform`，没有则自动添加 | 无 |
+| `m_text` | 必须包含 `Label`，先移除互斥渲染器（如 Sprite）再添加 | Sprite、RichText、EditBox 等渲染器 |
+| `m_btn` | 必须包含 `Button` 组件，没有则自动添加 | 无（Button 不与渲染器互斥） |
+| `m_img` | 必须包含 `Sprite`，先移除互斥渲染器（如 Label）再添加 | Label、RichText、EditBox 等渲染器 |
+| `m_grid` | 必须包含 `Layout`，没有则自动添加 | 无 |
+| `m_list` | 必须包含 `ScrollView`（ListView 基于它） | 无 |
+| `m_scroll` | 必须包含 `ScrollView` | 无 |
+| `m_toggle` | 必须包含 `Toggle`，先移除互斥交互组件再添加 | Slider、ProgressBar |
+| `m_slider` | 必须包含 `Slider`，先移除互斥交互组件再添加 | Toggle、ProgressBar |
+| `m_progress` | 必须包含 `ProgressBar`，先移除互斥交互组件再添加 | Toggle、Slider |
+| `m_eb` | 必须包含 `EditBox`，先移除互斥渲染器再添加 | Sprite、Label、RichText 等渲染器 |
+| `m_rt` | 必须包含 `RichText`，先移除互斥渲染器再添加 | Sprite、Label、EditBox 等渲染器 |
+
+#### 互斥组件组（Cocos Creator 引擎限制）
+
+同一个节点上不能同时存在同组的组件：
+
+| 组别 | 互斥组件 | 说明 |
+|------|---------|------|
+| 渲染器组 | Sprite、Label、RichText、EditBox、Graphics、Mask | 每个节点只能有一个渲染器（继承自 UIRenderer） |
+| 交互组件组 | Toggle、Slider、ProgressBar | 互相排斥的交互组件 |
+
+#### 两阶段执行机制
+
+由于 Cocos Creator 引擎中移除组件后需要等待一帧刷新才能添加同组互斥组件，检查器采用两阶段执行：
+
+1. **阶段 1**：扫描所有节点，移除互斥组件，直接添加无冲突组件
+2. **等待刷新**：等待引擎 tick 完成组件销毁
+3. **阶段 2**：添加因互斥而推迟的组件（失败自动重试）
+
+> 典型场景：节点名称为 `m_textTitle` 但上面是 Sprite 组件（PSD 导入时图片层生成的），检查器会自动移除 Sprite，等引擎刷新后添加 Label。
 
 ---
 
@@ -1309,11 +1468,18 @@ Client/
 │   │   │   ├── update/            # Update 管理
 │   │   │   └── world/             # GameWorld
 │   │   └── Tyou.ts                # 框架入口 & 全局单例
+│   ├── asset-art/
+│   │   └── psd/                       # PSD 设计稿目录
+│   │       ├── *.psd                  # PSD 源文件
+│   │       └── tool/
+│   │           ├── Psd2CCC-Digest.jsx # PS 切图脚本（复制到 PS Scripts 目录使用）
+│   │           └── {psdName}/         # 每个 PSD 生成的 JSON 目录
+│   ├── asset-raw/
+│   │   └── ui-raw/atlas/{psdName}/    # PSD 导出的切图 PNG
 │   ├── editor/                     # 编辑器配置
-│   │   ├── ui-component-config.json   # UI 组件命名规范配置
+│   │   ├── ui-component-config.json   # UI 组件命名规范 + 前缀检查配置
 │   │   ├── ui-template.txt            # UI 代码生成模板
 │   │   └── asset-index-config.json    # 资源索引扫描配置
-│   ├── asset-raw/                  # 原始资源（按 Bundle 组织）
 │   ├── scripts/                    # 业务逻辑代码
 │   │   ├── Main.ts                    # 入口组件
 │   │   └── logic/ui/
@@ -1323,7 +1489,8 @@ Client/
 │   │       └── ...
 │   └── resources/                  # resources 目录
 ├── extensions/
-│   ├── uitscreate/                # UI 代码生成插件
+│   ├── psd2ccc/                   # PSD → Cocos 节点树生成插件
+│   ├── uitscreate/                # UI 代码生成 + 前缀检查插件
 │   └── assetool/                  # 资源索引生成插件
 Design/
 ├── tools/
