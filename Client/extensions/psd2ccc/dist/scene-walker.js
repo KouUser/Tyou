@@ -28,10 +28,17 @@ function _findCanvas(node) {
 // 坐标转换: PSD 绝对坐标 → Cocos 相对坐标
 // PSD: 原点左上，Y 向下
 // Cocos: 原点在父节点锚点(默认中心)，Y 向上
+// Fix: 使用 sourceBounds 中心而非 offset+size/2，避免 trim 后错位
 // ===========================
-function calcPosition(childOffset, childSize, parentOffset, parentSize) {
-    var cx = childOffset.left + childSize.width * 0.5;
-    var cy = childOffset.top + childSize.height * 0.5;
+function calcPosition(childData, parentOffset, parentSize) {
+    var cx, cy;
+    if (childData.sourceBounds) {
+        cx = (childData.sourceBounds.left + childData.sourceBounds.right) * 0.5;
+        cy = (childData.sourceBounds.top + childData.sourceBounds.bottom) * 0.5;
+    } else {
+        cx = childData.offset.left + childData.size.width * 0.5;
+        cy = childData.offset.top + childData.size.height * 0.5;
+    }
     var px = parentOffset.left + parentSize.width * 0.5;
     var py = parentOffset.top + parentSize.height * 0.5;
     return {
@@ -47,15 +54,25 @@ function createNode(parent, data, parentOffset, parentSize, spriteMap) {
     var node = new cc.Node(data.name);
     parent.addChild(node);
 
+    // 使用 trimmedSize（裁切后真实尺寸）设置 contentSize
+    var displayW = (data.trimmedSize && data.trimmedSize.width) || data.size.width;
+    var displayH = (data.trimmedSize && data.trimmedSize.height) || data.size.height;
     var transform = node.addComponent('cc.UITransform');
-    transform.setContentSize(data.size.width, data.size.height);
+    transform.setContentSize(displayW, displayH);
 
-    var pos = calcPosition(data.offset, data.size, parentOffset, parentSize);
+    var pos = calcPosition(data, parentOffset, parentSize);
     node.setPosition(pos.x, pos.y, 0);
 
     if (data.type === 'png') {
         var sprite = node.addComponent('cc.Sprite');
         sprite.sizeMode = 2; // CUSTOM
+
+        // PNG 图层透明度
+        var pngOpacity = (data.options && typeof data.options.opacity === 'number') ? data.options.opacity : 100;
+        if (pngOpacity < 100) {
+            node.getComponent('cc.UIOpacity') || node.addComponent('cc.UIOpacity');
+            node.getComponent('cc.UIOpacity').opacity = Math.round(pngOpacity * 2.55);
+        }
 
         var sfUuid = spriteMap[data.relativePath];
         if (sfUuid) {
@@ -65,7 +82,7 @@ function createNode(parent, data, parentOffset, parentSize, spriteMap) {
                     sprite.spriteFrame = cached;
                 } else {
                     cc.assetManager.loadAny(sfUuid, function (err, asset) {
-                        if (!err && asset && node.isValid) {
+                        if (!err && asset && node.isValid && sprite.isValid) {
                             sprite.spriteFrame = asset;
                         }
                     });
@@ -79,13 +96,36 @@ function createNode(parent, data, parentOffset, parentSize, spriteMap) {
         var opts = data.options || {};
         label.string = opts.textContents || '';
         label.fontSize = opts.textSize || 14;
-        label.lineHeight = opts.textSize || 14;
-        label.overflow = 1; // CLAMP
-        label.horizontalAlign = 0; // LEFT
-        label.verticalAlign = 1; // CENTER
+
+        // 行高：优先用 leading，为 0 时回退到 textSize（Fix #6）
+        var leading = opts.leading;
+        label.lineHeight = (typeof leading === 'number' && leading > 0) ? leading : (opts.textSize || 14);
+
+        // 点文字用 NONE（不裁剪），段落文本用 CLAMP
+        if (opts.textBoxBounds && opts.textBoxBounds.width > 0) {
+            label.overflow = 1; // CLAMP
+        } else {
+            label.overflow = 0; // NONE - 点文字不限制尺寸，避免裁剪
+        }
         label.useSystemFont = true;
         label.cacheMode = 0; // NONE
-        transform.setContentSize(data.size.width, data.size.height);
+
+        // 对齐方式映射（Fix #6）
+        var justMap = { LEFT: 0, CENTER: 1, RIGHT: 2, JUSTIFYLEFT: 0, JUSTIFYCENTER: 1, JUSTIFYRIGHT: 2, JUSTIFYALL: 0 };
+        var just = opts.justification || 'LEFT';
+        label.horizontalAlign = (justMap[just] != null) ? justMap[just] : 0;
+        label.verticalAlign = 1; // CENTER
+
+        // 粗体/斜体（Fix #6）
+        if (opts.fauxBold) label.isBold = true;
+        if (opts.fauxItalic) label.isItalic = true;
+
+        // 文本框尺寸（Fix #6）：段落文本用 textBoxBounds，否则用 layer size
+        if (opts.textBoxBounds && opts.textBoxBounds.width > 0) {
+            transform.setContentSize(opts.textBoxBounds.width, opts.textBoxBounds.height || data.size.height);
+        } else {
+            transform.setContentSize(data.size.width, data.size.height);
+        }
 
         // 设置文字颜色
         var tc = opts.textColor || { red: 0, green: 0, blue: 0 };
@@ -93,6 +133,30 @@ function createNode(parent, data, parentOffset, parentSize, spriteMap) {
         var g = typeof tc.green === 'number' ? tc.green : 0;
         var b = typeof tc.blue === 'number' ? tc.blue : 0;
         label.color = cc.color(r, g, b, 255);
+
+        // 透明度
+        if (typeof opts.opacity === 'number' && opts.opacity < 100) {
+            node.getComponent('cc.UIOpacity') || node.addComponent('cc.UIOpacity');
+            node.getComponent('cc.UIOpacity').opacity = Math.round(opts.opacity * 2.55);
+        }
+
+        // 描边（Label 内置属性）
+        if (opts.outline && opts.outline.width > 0) {
+            label.enableOutline = true;
+            label.outlineWidth = opts.outline.width;
+            var oc = opts.outline.color || { red: 0, green: 0, blue: 0 };
+            label.outlineColor = cc.color(oc.red || 0, oc.green || 0, oc.blue || 0, 255);
+        }
+
+        // 阴影（Label 内置属性）
+        if (opts.shadow) {
+            label.enableShadow = true;
+            var shc = opts.shadow.color || { red: 0, green: 0, blue: 0 };
+            var shAlpha = (typeof opts.shadow.opacity === 'number') ? Math.round(opts.shadow.opacity * 2.55) : 255;
+            label.shadowColor = cc.color(shc.red || 0, shc.green || 0, shc.blue || 0, shAlpha);
+            label.shadowOffset = cc.v2(opts.shadow.offsetX || 2, opts.shadow.offsetY || -2);
+            label.shadowBlur = opts.shadow.blur || 2;
+        }
     }
 
     if (data.children && data.children.length > 0) {
@@ -158,19 +222,13 @@ module.exports = {
             var uiTransform = uiRoot.addComponent('cc.UITransform');
             uiTransform.setContentSize(rootSize.width, rootSize.height);
 
-            // Widget 全屏
-            var widget = uiRoot.addComponent('cc.Widget');
-            widget.isAlignTop = true;
-            widget.isAlignBottom = true;
-            widget.isAlignLeft = true;
-            widget.isAlignRight = true;
-            widget.top = 0;
-            widget.bottom = 0;
-            widget.left = 0;
-            widget.right = 0;
-
-            // 创建所有子节点
-            buildChildren(uiRoot, data.children, rootOffset, rootSize, spriteMap);
+            // 创建所有子节点（try/catch 保护，失败时清理残留节点）
+            try {
+                buildChildren(uiRoot, data.children, rootOffset, rootSize, spriteMap);
+            } catch (buildErr) {
+                uiRoot.destroy();
+                throw buildErr;
+            }
 
             var total = countNodes(data.children);
             console.log('[PSD2CCC] 已在 Canvas/' + uiNodeName + ' 下创建 ' + total + ' 个节点');

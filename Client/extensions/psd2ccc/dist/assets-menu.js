@@ -82,6 +82,19 @@ async function buildUIFromJSON(jsonFilePath) {
         const atlasPath = data.atlasPath || '';
         const spriteMap = atlasPath ? resolveSpriteFrameUuids(atlasPath) : {};
 
+        // 检查资源是否已导入完成
+        const dirPath = path.join(Editor.Project.path, 'assets', atlasPath);
+        if (atlasPath && fs.existsSync(dirPath)) {
+            const pngFiles = fs.readdirSync(dirPath).filter(f => f.endsWith('.png'));
+            if (Object.keys(spriteMap).length === 0 && pngFiles.length > 0) {
+                await Editor.Dialog.warn('警告', {
+                    detail: '发现 ' + pngFiles.length + ' 个 PNG 但无法解析精灵帧，请等待 Cocos 资源导入完成后重试',
+                    buttons: ['确定'],
+                });
+                return;
+            }
+        }
+
         // 3. 构建 UI 名称
         const psdName = data.psdName || path.basename(jsonFilePath, '.json').replace(/-structure$/, '');
         const uiNodeName = psdName + 'UI';

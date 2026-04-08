@@ -54,8 +54,16 @@ function resolveSpriteFrameUuids(atlasPath) {
 /**
  * 从 PSD JSON 生成 UI 节点树
  */
-async function buildUIFromPSD(nodeUuid) {
+async function buildUIFromPSD(nodeInfo) {
     try {
+        // 提取右键目标节点的 UUID
+        var targetNodeUuid = null;
+        if (nodeInfo && typeof nodeInfo === 'object' && nodeInfo.uuid) {
+            targetNodeUuid = nodeInfo.uuid;
+        } else if (typeof nodeInfo === 'string') {
+            targetNodeUuid = nodeInfo;
+        }
+
         // 1. 打开文件选择对话框
         const defaultDir = path.join(Editor.Project.path, 'assets', 'asset-art', 'psd', 'tool');
         const result = await Editor.Dialog.select({
@@ -95,11 +103,28 @@ async function buildUIFromPSD(nodeUuid) {
         const atlasPath = data.atlasPath || '';
         const spriteMap = atlasPath ? resolveSpriteFrameUuids(atlasPath) : {};
 
-        // 4. 调用场景脚本创建节点
+        // 检查资源是否已导入完成
+        const dirPath = path.join(Editor.Project.path, 'assets', atlasPath);
+        if (atlasPath && fs.existsSync(dirPath)) {
+            const pngFiles = fs.readdirSync(dirPath).filter(f => f.endsWith('.png'));
+            if (Object.keys(spriteMap).length === 0 && pngFiles.length > 0) {
+                await Editor.Dialog.warn('警告', {
+                    detail: '发现 ' + pngFiles.length + ' 个 PNG 但无法解析精灵帧，请等待 Cocos 资源导入完成后重试',
+                    buttons: ['确定'],
+                });
+                return;
+            }
+        }
+
+        // 4. 构建节点名称
+        const psdName = data.psdName || 'PSD';
+        const uiNodeName = psdName + 'UI';
+
+        // 5. 调用场景脚本创建节点
         const buildResult = await Editor.Message.request('scene', 'execute-scene-script', {
             name: 'psd2ccc',
             method: 'buildNodes',
-            args: [nodeUuid, JSON.stringify(data), JSON.stringify(spriteMap)],
+            args: [uiNodeName, JSON.stringify(data), JSON.stringify(spriteMap)],
         });
 
         console.log('[PSD2CCC] 构建结果:', buildResult);

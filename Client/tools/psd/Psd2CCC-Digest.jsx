@@ -6,14 +6,31 @@
  *       运行此脚本。
  *
  * 输出：
- *   PNG → {Client}/assets/asset-art/atlas/{psdName}/
+ *   PNG  → {Client}/assets/asset-art/atlas/{psdName}/
  *   JSON → {psdFolder}/tool/{psdName}/{psdName}-structure.json
+ *   报告 → {psdFolder}/tool/{psdName}/{psdName}-report.json
  *
- * 文字层 → text 节点；其余可见图层/组 → png 导出。
+ * 导出规则：
+ *   - 文字层 → text 节点（仅导出文本属性，不导出图片）
+ *   - 普通可见 ArtLayer（非文字）→ 导出 PNG
+ *   - LayerSet（组）→ 仅导出结构信息（type:"group"），默认不导出组 PNG
+ *     如需导出组 PNG，设置下方 EXPORT_GROUP_AS_PNG = true
+ *
+ * JSON 定位协议：
+ *   - offset      : 图层在 PSD 画布中的 left/top（原始坐标）
+ *   - sourceBounds : 图层在 PSD 画布中的 left/top/right/bottom
+ *   - trimmedSize  : 裁切透明后实际导出图的 width/height
+ *
  * 不修改 PSD 任何内容（栅格化后自动恢复）。
  */
 
 #target photoshop
+
+// ===========================
+// 配置项
+// ===========================
+var EXPORT_GROUP_AS_PNG = false;  // 是否将组合并导出为一张 PNG
+var TEMP_DOC_MARGIN     = 200;   // 导出临时文档裁切边距（像素），兼容图层效果溢出
 
 // ===========================
 // JSON polyfill
@@ -55,10 +72,36 @@ if (typeof JSON === 'undefined') { JSON = {}; }
 // ===========================
 function ensureFolder(p) { var f = new Folder(p); if (!f.exists) f.create(); return f; }
 
+// 文件名清洗：移除非法字符，确保跨平台安全（Fix #5）
+function sanitizeFileName(s) {
+    return s
+        .replace(/[\\\/:\*\?"<>\|\x00-\x1f]/g, "_")
+        .replace(/\s+/g, "_")
+        .replace(/\.+$/g, "")
+        .replace(/_+/g, "_")
+        .replace(/^_+|_+$/g, "");
+}
+
+// 简单字符串哈希（djb2），返回 4 位 hex（Fix #3, #4）
+function strHash(s) {
+    var h = 5381;
+    for (var i = 0; i < s.length; i++) {
+        h = ((h * 33) ^ s.charCodeAt(i)) & 0x7FFFFFFF;
+    }
+    var hex = h.toString(16);
+    while (hex.length < 4) hex = "0" + hex;
+    return hex.slice(-4);
+}
+
 // DOM 检测文字层
 function isText(ly) {
     try { var t = ly.textItem; return (t != null); }
     catch (e) { return false; }
+}
+
+// 检测图层是否处于剪贴蒙版链中（Fix #8）
+function isClipped(ly) {
+    try { return ly.grouped; } catch (e) { return false; }
 }
 
 // AM 获取 layerKind  0像素 1文字 2调整 3填充 4形状 5智能对象 7视频 8三D
@@ -113,9 +156,20 @@ function rasterize(doc, ly) {
 }
 
 // ===========================
-// 统计
+// 统计 & 警告（Fix #10, #14）
 // ===========================
-var stat = { raster: 0, png: 0, text: 0, skip: 0, dedup: 0 };
+var stat = {
+    raster: 0, png: 0, text: 0, skip: 0, dedup: 0,
+    groupCount: 0, emptyGroupCount: 0,
+    clippingLayerCount: 0, unsupportedCount: 0,
+    warnings: 0, errors: 0
+};
+var warnings = [];
+
+function addWarning(layerPath, step, message) {
+    warnings.push({ layer: layerPath, step: step, message: message });
+    stat.warnings++;
+}
 
 // ===========================
 // 栅格化智能对象/视频/3D/形状/填充
@@ -134,23 +188,16 @@ function doRasterize(doc, layers) {
                     if (rasterize(doc, ly)) stat.raster++;
                 }
             }
-        } catch (e) {}
+        } catch (e) {
+            addWarning("doRasterize[" + i + "]", "rasterize", e.message || String(e));
+        }
     }
 }
 
 // ===========================
-// 指纹去重注册表
+// 指纹去重注册表（基于文件内容哈希）
 // ===========================
 var dedupMap = {};
-
-function getDocFingerprint(tmpDoc) {
-    var w = Math.round(parseFloat(tmpDoc.width));
-    var h = Math.round(parseFloat(tmpDoc.height));
-    var hist = tmpDoc.histogram;
-    var sig = w + "x" + h;
-    for (var i = 0; i < 256; i++) sig += "," + hist[i];
-    return sig;
-}
 
 // ===========================
 // 中文 → 拼音首字母 查找表
@@ -222,18 +269,30 @@ function convertSegment(name) {
     return name;
 }
 
-function buildExportName(psdPrefix, layerName) {
-    return psdPrefix + "_" + convertSegment(layerName);
+// 构建导出文件名：路径式命名 + 安全清洗 + 短 hash（Fix #3, #4, #5）
+function buildExportName(psdPrefix, layerPath) {
+    var segments = layerPath.split("/");
+    var converted = [];
+    for (var i = 0; i < segments.length; i++) {
+        converted.push(sanitizeFileName(convertSegment(segments[i])));
+    }
+    var pathName = converted.join("_");
+    var hash = strHash(layerPath);
+    return sanitizeFileName(psdPrefix + "_" + pathName + "_" + hash);
 }
 
 // ===========================
-// 导出单个图层/组为 PNG（含去重）
+// 导出单个图层/组为 PNG（Fix #2: 文件内容哈希去重, Fix #7: sourceBounds/trimmedSize, Fix #9: 裁切优化, Fix #10: 警告记录）
 // ===========================
-function savePNG(doc, layer, path, relPath) {
+function savePNG(doc, layer, path, relPath, layerRelPath) {
     try {
         var b = layer.bounds;
-        if (parseFloat(b[2]) - parseFloat(b[0]) <= 0) return false;
-        if (parseFloat(b[3]) - parseFloat(b[1]) <= 0) return false;
+        var bL = parseFloat(b[0]), bT = parseFloat(b[1]);
+        var bR = parseFloat(b[2]), bB = parseFloat(b[3]);
+        var bW = bR - bL, bH = bB - bT;
+        if (bW <= 0 || bH <= 0) return false;
+
+        var docW = parseFloat(doc.width), docH = parseFloat(doc.height);
 
         var tmp = app.documents.add(doc.width, doc.height, doc.resolution,
             "__t__", NewDocumentMode.RGB, DocumentFill.TRANSPARENT);
@@ -243,36 +302,61 @@ function savePNG(doc, layer, path, relPath) {
         layer.duplicate(tmp, ElementPlacement.INSIDE);
 
         app.activeDocument = tmp;
+
+        // 性能优化（Fix #9）：合并前裁切到图层区域 + 边距，减少处理量
+        var margin = TEMP_DOC_MARGIN;
+        var cL = Math.max(0, bL - margin);
+        var cT = Math.max(0, bT - margin);
+        var cR = Math.min(docW, bR + margin);
+        var cB = Math.min(docH, bB + margin);
+        if (cR - cL < docW || cB - cT < docH) {
+            try {
+                tmp.crop([UnitValue(cL, "px"), UnitValue(cT, "px"),
+                          UnitValue(cR, "px"), UnitValue(cB, "px")]);
+            } catch (e) { /* 裁切失败时继续使用全尺寸 */ }
+        }
+
         tmp.mergeVisibleLayers();
         try { tmp.trim(TrimType.TRANSPARENT); } catch (e) {
             tmp.close(SaveOptions.DONOTSAVECHANGES);
             app.activeDocument = doc;
+            addWarning(layerRelPath || relPath, "trim", "trim 失败: " + (e.message || String(e)));
             return false;
         }
 
         var tw = Math.round(parseFloat(tmp.width));
         var th = Math.round(parseFloat(tmp.height));
 
-        var fp = getDocFingerprint(tmp);
+        // 去重指纹：在临时文档上用尺寸+直方图计算（保存前判断，避免 PNG 元数据差异）
+        var fp = tw + "x" + th;
+        var hist = tmp.histogram;
+        for (var hi = 0; hi < 256; hi++) fp += "," + hist[hi];
+
         if (dedupMap[fp]) {
             tmp.close(SaveOptions.DONOTSAVECHANGES);
             app.activeDocument = doc;
             stat.dedup++;
             var prev = dedupMap[fp];
-            return { ok: true, width: tw, height: th, relPath: prev.relPath };
+            return { ok: true, width: tw, height: th, relPath: prev.relPath,
+                sourceBounds: { left: Math.round(bL), top: Math.round(bT), right: Math.round(bR), bottom: Math.round(bB) },
+                trimmedSize: { width: tw, height: th } };
         }
 
         var f = new File(path);
         var o = new PNGSaveOptions();
         o.interlaced = false;
         tmp.saveAs(f, o, true, Extension.LOWERCASE);
+        tmp.close(SaveOptions.DONOTSAVECHANGES);
+        app.activeDocument = doc;
 
         dedupMap[fp] = { relPath: relPath };
 
-        tmp.close(SaveOptions.DONOTSAVECHANGES);
-        app.activeDocument = doc;
-        return { ok: true, width: tw, height: th, relPath: relPath };
+        return { ok: true, width: tw, height: th, relPath: relPath,
+            sourceBounds: { left: Math.round(bL), top: Math.round(bT), right: Math.round(bR), bottom: Math.round(bB) },
+            trimmedSize: { width: tw, height: th } };
     } catch (e) {
+        addWarning(layerRelPath || relPath || "unknown", "savePNG", e.message || String(e));
+        stat.errors++;
         try {
             for (var i = 0; i < app.documents.length; i++) {
                 var dn = app.documents[i].name;
@@ -287,19 +371,31 @@ function savePNG(doc, layer, path, relPath) {
 }
 
 // ===========================
-// bounds 和 textInfo
+// bounds（Fix #7: 增加 right/bottom）和 textInfo（Fix #6: 完整文字属性）
 // ===========================
 function getBounds(ly) {
     var b = ly.bounds;
     var l = Math.round(parseFloat(b[0])), t = Math.round(parseFloat(b[1]));
-    return { left: l, top: t,
-             width: Math.round(parseFloat(b[2])) - l,
-             height: Math.round(parseFloat(b[3])) - t };
+    var r = Math.round(parseFloat(b[2])), bt = Math.round(parseFloat(b[3]));
+    return { left: l, top: t, width: r - l, height: bt - t, right: r, bottom: bt };
 }
 
 function textInfo(ly) {
-    var r = { textContents: "", textFont: "Arial", textSize: 14,
-              textColor: { red: 0, green: 0, blue: 0 } };
+    var r = {
+        textContents: "", textFont: "Arial", textSize: 14,
+        textColor: { red: 0, green: 0, blue: 0 },
+        justification: "LEFT",
+        leading: 0,
+        tracking: 0,
+        antiAliasMethod: "SHARP",
+        opacity: 100,
+        blendMode: "NORMAL",
+        fauxBold: false,
+        fauxItalic: false,
+        textBoxBounds: null,
+        outline: null,
+        shadow: null
+    };
     try {
         var t = ly.textItem;
         r.textContents = t.contents;
@@ -308,6 +404,109 @@ function textInfo(ly) {
         try {
             var c = t.color.rgb;
             r.textColor = { red: Math.round(c.red), green: Math.round(c.green), blue: Math.round(c.blue) };
+        } catch (e) {}
+        // 对齐方式
+        try { r.justification = String(t.justification).replace("Justification.", ""); } catch (e) {}
+        // 行高
+        try { r.leading = Math.round(parseFloat(t.leading)); } catch (e) { r.leading = 0; }
+        // 字间距
+        try { r.tracking = Math.round(parseFloat(t.tracking)); } catch (e) {}
+        // 抗锯齿
+        try { r.antiAliasMethod = String(t.antiAliasMethod).replace("AntiAlias.", ""); } catch (e) {}
+        // 透明度
+        try { r.opacity = Math.round(ly.opacity); } catch (e) {}
+        // 混合模式
+        try { r.blendMode = String(ly.blendMode).replace("BlendMode.", ""); } catch (e) {}
+        // faux 样式（通过 AM 读取）
+        try {
+            var ref = new ActionReference();
+            ref.putIdentifier(charIDToTypeID("Lyr "), ly.id);
+            var desc = executeActionGet(ref);
+            if (desc.hasKey(stringIDToTypeID("textKey"))) {
+                var textDesc = desc.getObjectValue(stringIDToTypeID("textKey"));
+                if (textDesc.hasKey(stringIDToTypeID("textStyleRange"))) {
+                    var tsrList = textDesc.getList(stringIDToTypeID("textStyleRange"));
+                    if (tsrList.count > 0) {
+                        var tsr = tsrList.getObjectValue(0);
+                        if (tsr.hasKey(stringIDToTypeID("textStyle"))) {
+                            var ts = tsr.getObjectValue(stringIDToTypeID("textStyle"));
+                            if (ts.hasKey(stringIDToTypeID("syntheticBold")))
+                                r.fauxBold = ts.getBoolean(stringIDToTypeID("syntheticBold"));
+                            if (ts.hasKey(stringIDToTypeID("syntheticItalic")))
+                                r.fauxItalic = ts.getBoolean(stringIDToTypeID("syntheticItalic"));
+                        }
+                    }
+                }
+            }
+        } catch (e) {}
+        // 文本框尺寸（段落文本）
+        try {
+            if (t.kind === TextType.PARAGRAPHTEXT) {
+                r.textBoxBounds = {
+                    width: Math.round(parseFloat(t.width)),
+                    height: Math.round(parseFloat(t.height))
+                };
+            }
+        } catch (e) {}
+        // 图层样式：描边(Stroke)和投影(DropShadow) 通过 AM 读取 layerEffects
+        try {
+            var lref = new ActionReference();
+            lref.putIdentifier(charIDToTypeID("Lyr "), ly.id);
+            var ldesc = executeActionGet(lref);
+            if (ldesc.hasKey(stringIDToTypeID("layerEffects"))) {
+                var fx = ldesc.getObjectValue(stringIDToTypeID("layerEffects"));
+                // 描边 (frameFX)
+                if (fx.hasKey(stringIDToTypeID("frameFX"))) {
+                    var stroke = fx.getObjectValue(stringIDToTypeID("frameFX"));
+                    var strokeEnabled = true;
+                    if (stroke.hasKey(stringIDToTypeID("enabled")))
+                        strokeEnabled = stroke.getBoolean(stringIDToTypeID("enabled"));
+                    if (strokeEnabled) {
+                        var strokeWidth = 1;
+                        if (stroke.hasKey(stringIDToTypeID("size")))
+                            strokeWidth = Math.round(stroke.getUnitDoubleValue(stringIDToTypeID("size")));
+                        var strokeColor = { red: 0, green: 0, blue: 0 };
+                        if (stroke.hasKey(stringIDToTypeID("color"))) {
+                            var sc = stroke.getObjectValue(stringIDToTypeID("color"));
+                            strokeColor.red = Math.round(sc.getDouble(charIDToTypeID("Rd  ")));
+                            strokeColor.green = Math.round(sc.getDouble(charIDToTypeID("Grn ")));
+                            strokeColor.blue = Math.round(sc.getDouble(charIDToTypeID("Bl  ")));
+                        }
+                        r.outline = { width: strokeWidth, color: strokeColor };
+                    }
+                }
+                // 投影 (dropShadow)
+                if (fx.hasKey(stringIDToTypeID("dropShadow"))) {
+                    var ds = fx.getObjectValue(stringIDToTypeID("dropShadow"));
+                    var dsEnabled = true;
+                    if (ds.hasKey(stringIDToTypeID("enabled")))
+                        dsEnabled = ds.getBoolean(stringIDToTypeID("enabled"));
+                    if (dsEnabled) {
+                        var dsColor = { red: 0, green: 0, blue: 0 };
+                        if (ds.hasKey(stringIDToTypeID("color"))) {
+                            var dc = ds.getObjectValue(stringIDToTypeID("color"));
+                            dsColor.red = Math.round(dc.getDouble(charIDToTypeID("Rd  ")));
+                            dsColor.green = Math.round(dc.getDouble(charIDToTypeID("Grn ")));
+                            dsColor.blue = Math.round(dc.getDouble(charIDToTypeID("Bl  ")));
+                        }
+                        var dsOpacity = 75;
+                        if (ds.hasKey(stringIDToTypeID("opacity")))
+                            dsOpacity = Math.round(ds.getUnitDoubleValue(stringIDToTypeID("opacity")));
+                        var dsAngle = 120, dsDistance = 5, dsBlur = 5;
+                        if (ds.hasKey(stringIDToTypeID("localLightingAngle")))
+                            dsAngle = Math.round(ds.getUnitDoubleValue(stringIDToTypeID("localLightingAngle")));
+                        if (ds.hasKey(stringIDToTypeID("distance")))
+                            dsDistance = Math.round(ds.getUnitDoubleValue(stringIDToTypeID("distance")));
+                        if (ds.hasKey(stringIDToTypeID("blur")))
+                            dsBlur = Math.round(ds.getUnitDoubleValue(stringIDToTypeID("blur")));
+                        // 角度转 XY 偏移
+                        var rad = dsAngle * Math.PI / 180;
+                        var offsetX = Math.round(Math.cos(rad) * dsDistance);
+                        var offsetY = -Math.round(Math.sin(rad) * dsDistance);
+                        r.shadow = { color: dsColor, opacity: dsOpacity, offsetX: offsetX, offsetY: offsetY, blur: dsBlur };
+                    }
+                }
+            }
         } catch (e) {}
     } catch (e) {}
     return r;
@@ -324,25 +523,138 @@ function uniqueName(fp) {
 }
 
 // ===========================
-// 遍历 + 导出 + 构建 JSON
+// 导出组为 PNG（当 EXPORT_GROUP_AS_PNG 为 true 时使用，Fix #1）
+// ===========================
+function saveGroupPNG(doc, layerSet, path, relPath, layerRelPath) {
+    try {
+        var b = layerSet.bounds;
+        var bL = parseFloat(b[0]), bT = parseFloat(b[1]);
+        var bR = parseFloat(b[2]), bB = parseFloat(b[3]);
+        var bW = bR - bL, bH = bB - bT;
+        if (bW <= 0 || bH <= 0) return false;
+
+        var docW = parseFloat(doc.width), docH = parseFloat(doc.height);
+        var tmp = app.documents.add(doc.width, doc.height, doc.resolution,
+            "__t__", NewDocumentMode.RGB, DocumentFill.TRANSPARENT);
+
+        app.activeDocument = doc;
+        layerSet.duplicate(tmp, ElementPlacement.INSIDE);
+        app.activeDocument = tmp;
+
+        var margin = TEMP_DOC_MARGIN;
+        var cL = Math.max(0, bL - margin);
+        var cT = Math.max(0, bT - margin);
+        var cR = Math.min(docW, bR + margin);
+        var cB = Math.min(docH, bB + margin);
+        if (cR - cL < docW || cB - cT < docH) {
+            try {
+                tmp.crop([UnitValue(cL, "px"), UnitValue(cT, "px"),
+                          UnitValue(cR, "px"), UnitValue(cB, "px")]);
+            } catch (e) {}
+        }
+
+        tmp.mergeVisibleLayers();
+        try { tmp.trim(TrimType.TRANSPARENT); } catch (e) {
+            tmp.close(SaveOptions.DONOTSAVECHANGES);
+            app.activeDocument = doc;
+            addWarning(layerRelPath, "trim", "组 trim 失败: " + (e.message || String(e)));
+            return false;
+        }
+
+        var tw = Math.round(parseFloat(tmp.width));
+        var th = Math.round(parseFloat(tmp.height));
+
+        // 去重指纹：在临时文档上用尺寸+直方图计算
+        var fp = tw + "x" + th;
+        var hist = tmp.histogram;
+        for (var hi = 0; hi < 256; hi++) fp += "," + hist[hi];
+
+        if (dedupMap[fp]) {
+            tmp.close(SaveOptions.DONOTSAVECHANGES);
+            app.activeDocument = doc;
+            stat.dedup++;
+            var prev = dedupMap[fp];
+            return { ok: true, width: tw, height: th, relPath: prev.relPath,
+                sourceBounds: { left: Math.round(bL), top: Math.round(bT), right: Math.round(bR), bottom: Math.round(bB) },
+                trimmedSize: { width: tw, height: th } };
+        }
+
+        var f = new File(path);
+        var o = new PNGSaveOptions();
+        o.interlaced = false;
+        tmp.saveAs(f, o, true, Extension.LOWERCASE);
+        tmp.close(SaveOptions.DONOTSAVECHANGES);
+        app.activeDocument = doc;
+
+        dedupMap[fp] = { relPath: relPath };
+
+        return { ok: true, width: tw, height: th, relPath: relPath,
+            sourceBounds: { left: Math.round(bL), top: Math.round(bT), right: Math.round(bR), bottom: Math.round(bB) },
+            trimmedSize: { width: tw, height: th } };
+    } catch (e) {
+        addWarning(layerRelPath, "saveGroupPNG", e.message || String(e));
+        stat.errors++;
+        try {
+            for (var i = 0; i < app.documents.length; i++) {
+                if (app.documents[i].name === "__t__") {
+                    app.documents[i].close(SaveOptions.DONOTSAVECHANGES);
+                }
+            }
+            app.activeDocument = doc;
+        } catch (e2) {}
+        return false;
+    }
+}
+
+// ===========================
+// 遍历 + 导出 + 构建 JSON（Fix #1, #7, #8, #10, #14）
 // ===========================
 function walk(doc, layers, parent, assetsDir, psdPrefix) {
     var out = [];
     for (var i = 0; i < layers.length; i++) {
+        var rel = "";
         try {
             var ly = layers[i];
             if (!ly.visible) continue;
             var nm  = ly.name;
-            var rel = parent ? (parent + "/" + nm) : nm;
+            rel = parent ? (parent + "/" + nm) : nm;
             var bd  = getBounds(ly);
 
+            // 检测剪贴蒙版（Fix #8）
+            if (ly.typename === "ArtLayer" && isClipped(ly)) {
+                stat.clippingLayerCount++;
+                addWarning(rel, "clippingMask",
+                    "图层处于剪贴蒙版链中，单独导出可能与 PSD 显示不一致");
+            }
+
             if (ly.typename === "LayerSet") {
-                if (ly.layers.length === 0) { stat.skip++; continue; }
+                stat.groupCount++;
+                if (ly.layers.length === 0) { stat.emptyGroupCount++; stat.skip++; continue; }
                 var sub = walk(doc, ly.layers, rel, assetsDir, psdPrefix);
-                out.push({ name: nm, type: "group", options: {},
+                var groupNode = {
+                    name: nm, type: "group", options: {},
                     offset: { left: bd.left, top: bd.top },
                     size: { width: bd.width, height: bd.height },
-                    relativePath: rel, children: sub });
+                    sourceBounds: { left: bd.left, top: bd.top, right: bd.right, bottom: bd.bottom },
+                    relativePath: rel, children: sub
+                };
+
+                // 可选：导出组 PNG（Fix #1）
+                if (EXPORT_GROUP_AS_PNG) {
+                    var groupFp = uniqueName(buildExportName(psdPrefix, rel));
+                    var groupRes = saveGroupPNG(doc, ly, assetsDir + "/" + groupFp + ".png", groupFp, rel);
+                    if (groupRes) {
+                        groupNode.groupImage = {
+                            relPath: groupRes.relPath,
+                            width: groupRes.width,
+                            height: groupRes.height,
+                            sourceBounds: groupRes.sourceBounds,
+                            trimmedSize: groupRes.trimmedSize
+                        };
+                        stat.png++;
+                    }
+                }
+                out.push(groupNode);
             } else if (ly.typename === "ArtLayer") {
                 if (isText(ly)) {
                     var ti = textInfo(ly);
@@ -354,26 +666,54 @@ function walk(doc, layers, parent, assetsDir, psdPrefix) {
                             textContents: ti.textContents,
                             textFont: ti.textFont,
                             textSize: ti.textSize,
-                            textColor: ti.textColor
+                            textColor: ti.textColor,
+                            justification: ti.justification,
+                            leading: ti.leading,
+                            tracking: ti.tracking,
+                            antiAliasMethod: ti.antiAliasMethod,
+                            opacity: ti.opacity,
+                            blendMode: ti.blendMode,
+                            fauxBold: ti.fauxBold,
+                            fauxItalic: ti.fauxItalic,
+                            textBoxBounds: ti.textBoxBounds,
+                            outline: ti.outline,
+                            shadow: ti.shadow
                         },
                         offset: { left: bd.left, top: bd.top },
                         size: { width: bd.width, height: bd.height },
+                        sourceBounds: { left: bd.left, top: bd.top, right: bd.right, bottom: bd.bottom },
                         relativePath: rel, children: [] });
                     stat.text++;
                 } else {
-                    if (shouldSkip(doc, ly)) { stat.skip++; continue; }
-                    var fp2 = uniqueName(buildExportName(psdPrefix, nm));
-                    var res2 = savePNG(doc, ly, assetsDir + "/" + fp2 + ".png", fp2);
+                    if (shouldSkip(doc, ly)) {
+                        var k = lkind(doc, ly);
+                        if (k != 2 && k != -1) stat.unsupportedCount++;
+                        stat.skip++;
+                        continue;
+                    }
+                    var fp2 = uniqueName(buildExportName(psdPrefix, rel));
+                    var res2 = savePNG(doc, ly, assetsDir + "/" + fp2 + ".png", fp2, rel);
                     if (res2) {
                         stat.png++;
-                        out.push({ name: nm, type: "png", options: {},
+                        var layerOpacity = 100;
+                        try { layerOpacity = Math.round(ly.opacity); } catch (e) {}
+                        out.push({ name: nm, type: "png", options: { opacity: layerOpacity },
                             offset: { left: bd.left, top: bd.top },
                             size: { width: res2.width, height: res2.height },
+                            sourceBounds: res2.sourceBounds,
+                            trimmedSize: res2.trimmedSize,
                             relativePath: res2.relPath, children: [] });
                     } else { stat.skip++; }
                 }
+            } else {
+                stat.unsupportedCount++;
+                stat.skip++;
             }
-        } catch (e) { stat.skip++; }
+        } catch (e) {
+            stat.skip++;
+            stat.errors++;
+            addWarning(rel || ("layer[" + i + "]"), "walk", e.message || String(e));
+        }
     }
     return out;
 }
@@ -388,16 +728,21 @@ function main() {
     var psdFolder = doc.fullName.parent.fsName;   // PSD 所在目录 (assets/asset-art/psd)
     var name      = doc.name;                      // e.g. "test_ui.psd"
     var rawPsdName = name.replace(/\.psd$/i, "");  // e.g. "test_ui"
-    var psdPrefix  = convertSegment(rawPsdName);   // 中文→拼音首字母
+    var psdPrefix  = sanitizeFileName(convertSegment(rawPsdName));   // Fix #5: 清洗文件名
 
-    // 从 PSD 目录反推 Client 根目录：assets/asset-art/psd → 向上 3 级
-    var clientRoot = new Folder(psdFolder).parent.parent.parent.fsName;
+    // 从 PSD 目录定位 Client 根目录：搜索 assets/asset-art/psd 标记
+    var psdFolderNorm = psdFolder.replace(/\\/g, '/');
+    var marker = '/assets/asset-art/psd';
+    var markerIdx = psdFolderNorm.indexOf(marker);
+    if (markerIdx < 0) { alert('PSD 不在 assets/asset-art/psd 目录下！'); return; }
+    var clientRoot = psdFolderNorm.substring(0, markerIdx);
 
     // PNG 输出目录
     var assetsDir = clientRoot + "/assets/asset-art/atlas/" + psdPrefix;
     // JSON 输出目录
     var jsonDir   = psdFolder + "/tool/" + psdPrefix;
     var jsonPath  = jsonDir + "/" + psdPrefix + "-structure.json";
+    var reportPath = jsonDir + "/" + psdPrefix + "-report.json";
 
     ensureFolder(assetsDir);
     ensureFolder(jsonDir);
@@ -431,22 +776,43 @@ function main() {
         f.write(JSON.stringify(st));
         f.close();
 
+        // ④ 保存报告（Fix #10）
+        var report = {
+            psdName: rawPsdName,
+            exportTime: new Date().toString(),
+            statistics: stat,
+            warnings: warnings
+        };
+        var rf = new File(reportPath);
+        rf.encoding = "UTF-8";
+        rf.open("w");
+        rf.write(JSON.stringify(report));
+        rf.close();
+
     } catch (e) {
         alert("导出出错: " + e.message + "\n行: " + e.line);
+        stat.errors++;
     }
 
-    // ④ 恢复 PSD
+    // ⑤ 恢复 PSD
     try { doc.activeHistoryState = savedHistory; } catch (e) {}
 
     app.preferences.rulerUnits = savedUnits;
 
+    // 汇总（Fix #14：更详细的统计信息）
     var m = "Psd2CCC Digest 完成！\n\n";
     m += "导出PNG: " + stat.png + "  文字: " + stat.text + "\n";
+    m += "组: " + stat.groupCount + "  空组: " + stat.emptyGroupCount + "\n";
     if (stat.dedup > 0) m += "去重: " + stat.dedup + " 个重复PNG已合并引用\n";
     if (stat.raster > 0) m += "栅格化: " + stat.raster + " 个特殊图层（已自动恢复）\n";
+    if (stat.clippingLayerCount > 0) m += "剪贴蒙版图层: " + stat.clippingLayerCount + " 个（可能失真）\n";
+    if (stat.unsupportedCount > 0) m += "不支持的图层: " + stat.unsupportedCount + "\n";
     if (stat.skip > 0) m += "跳过: " + stat.skip + "\n";
+    if (stat.warnings > 0) m += "警告: " + stat.warnings + " 条\n";
+    if (stat.errors > 0) m += "错误: " + stat.errors + " 条\n";
     m += "\nPNG: " + assetsDir;
     m += "\nJSON: " + jsonPath;
+    if (stat.warnings > 0 || stat.errors > 0) m += "\n报告: " + reportPath;
     alert(m);
 }
 

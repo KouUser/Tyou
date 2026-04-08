@@ -24,6 +24,12 @@
         "methods": "./dist/assets-menu.js",
         "assetMenu": "onAssetMenu"
       }
+    },
+    "hierarchy": {
+      "menu": {
+        "methods": "./dist/hierarchy-menu.js",
+        "hierarchyMenu": "onHierarchyMenu"
+      }
     }
   }
 }
