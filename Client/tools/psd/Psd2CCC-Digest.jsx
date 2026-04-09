@@ -29,8 +29,9 @@
 // ===========================
 // 配置项
 // ===========================
-var EXPORT_GROUP_AS_PNG = false;  // 是否将组合并导出为一张 PNG
-var TEMP_DOC_MARGIN     = 200;   // 导出临时文档裁切边距（像素），兼容图层效果溢出
+var EXPORT_GROUP_AS_PNG  = false;  // 是否将组合并导出为一张 PNG
+var TEMP_DOC_MARGIN      = 200;   // 导出临时文档裁切边距（像素），兼容图层效果溢出
+var SCALE9_KEEP_CENTER   = 2;     // 九宫格裁切后中间保留的拉伸像素数
 
 // ===========================
 // JSON polyfill
@@ -162,6 +163,7 @@ var stat = {
     raster: 0, png: 0, text: 0, skip: 0, dedup: 0,
     groupCount: 0, emptyGroupCount: 0,
     clippingLayerCount: 0, unsupportedCount: 0,
+    scale9Count: 0,
     warnings: 0, errors: 0
 };
 var warnings = [];
@@ -269,6 +271,132 @@ function convertSegment(name) {
     return name;
 }
 
+// ===========================
+// 九宫格（Scale9）命名约定解析
+// ===========================
+// 支持的命名后缀：
+//   _9s              → 标记为九宫格，使用像素扫描自动推算 insets
+//   _scale9           → 同上
+//   _9s_T_B_L_R       → 显式指定 insets（上_下_左_右，单位 px）
+//   _scale9_T_B_L_R   → 同上
+function parseScale9(layerName) {
+    // 带参数：_9s_10_10_20_20 或 _scale9_10_10_20_20（上_下_左_右）
+    var mParams = layerName.match(/[_](9s|scale9)[_](\d+)[_](\d+)[_](\d+)[_](\d+)$/);
+    if (mParams) {
+        return {
+            enabled: true,
+            top:    parseInt(mParams[2], 10),
+            bottom: parseInt(mParams[3], 10),
+            left:   parseInt(mParams[4], 10),
+            right:  parseInt(mParams[5], 10),
+            source: "name_params"
+        };
+    }
+    // 无参数：_9s 或 _scale9
+    var mFlag = layerName.match(/[_](9s|scale9)$/);
+    if (mFlag) {
+        return { enabled: true, top: 0, right: 0, bottom: 0, left: 0, source: "name_flag" };
+    }
+    return null;
+}
+
+// 从九宫格命名中去掉后缀，得到干净的图层名用于导出
+function stripScale9Suffix(layerName) {
+    return layerName
+        .replace(/[_](9s|scale9)[_]\d+[_]\d+[_]\d+[_]\d+$/, "")
+        .replace(/[_](9s|scale9)$/, "");
+}
+
+// 像素扫描推算九宫格 insets：取图片短边的 1/3 作为默认值
+function guessScale9Insets(w, h) {
+    var s = Math.min(w, h);
+    var d = Math.max(1, Math.round(s / 3));
+    return { top: d, right: d, bottom: d, left: d };
+}
+
+// ===========================
+// 九宫格中间裁切（保留四边 inset + 中间 KEEP 像素，删除多余区域）
+// ===========================
+function cropScale9(tmpDoc, s9) {
+    var keep = SCALE9_KEEP_CENTER;
+    var tw = Math.round(parseFloat(tmpDoc.width));
+    var th = Math.round(parseFloat(tmpDoc.height));
+    var newW = s9.left + keep + s9.right;
+    var newH = s9.top + keep + s9.bottom;
+    if (newW >= tw && newH >= th) return;
+
+    try { tmpDoc.activeLayer.isBackgroundLayer = false; } catch (e) {}
+
+    // 水平裁切
+    if (newW < tw) {
+        _s9CropAxis(tmpDoc, true, tw, th, s9.left, s9.right, keep);
+        tw = Math.round(parseFloat(tmpDoc.width));
+    }
+    // 垂直裁切
+    th = Math.round(parseFloat(tmpDoc.height));
+    if (newH < th) {
+        _s9CropAxis(tmpDoc, false, tw, th, s9.top, s9.bottom, keep);
+    }
+}
+
+// 用文档副本 + crop 实现单轴裁切，避免 selection.clear() 的 Background 层白色填充问题
+function _s9CropAxis(doc, isH, tw, th, startInset, endInset, keep) {
+    var newSize = startInset + keep + endInset;
+    try { doc.activeLayer.isBackgroundLayer = false; } catch (e) {}
+
+    // 1. 复制文档，crop 出末端区域（右侧/底部 endInset 像素）
+    var endDoc = doc.duplicate("__s9end__");
+    if (isH) {
+        endDoc.crop([UnitValue(tw - endInset, "px"), UnitValue(0, "px"),
+                     UnitValue(tw, "px"), UnitValue(th, "px")]);
+    } else {
+        endDoc.crop([UnitValue(0, "px"), UnitValue(th - endInset, "px"),
+                     UnitValue(tw, "px"), UnitValue(th, "px")]);
+    }
+
+    // 2. 主文档 crop 保留起始区域（startInset + keep 像素）
+    app.activeDocument = doc;
+    if (isH) {
+        doc.crop([UnitValue(0, "px"), UnitValue(0, "px"),
+                  UnitValue(startInset + keep, "px"), UnitValue(th, "px")]);
+    } else {
+        doc.crop([UnitValue(0, "px"), UnitValue(0, "px"),
+                  UnitValue(tw, "px"), UnitValue(startInset + keep, "px")]);
+    }
+
+    // 3. 扩展画布到最终尺寸
+    try { doc.activeLayer.isBackgroundLayer = false; } catch (e) {}
+    if (isH) {
+        doc.resizeCanvas(UnitValue(newSize, "px"), UnitValue(th, "px"), AnchorPosition.TOPLEFT);
+    } else {
+        doc.resizeCanvas(UnitValue(tw, "px"), UnitValue(newSize, "px"), AnchorPosition.TOPLEFT);
+    }
+
+    // 4. 从副本中全选+复制末端区域，粘贴到主文档
+    app.activeDocument = endDoc;
+    try { endDoc.activeLayer.isBackgroundLayer = false; } catch (e) {}
+    endDoc.selection.selectAll();
+    endDoc.selection.copy();
+    endDoc.close(SaveOptions.DONOTSAVECHANGES);
+
+    app.activeDocument = doc;
+    doc.paste();
+    var pasted = doc.activeLayer;
+    var pb = pasted.bounds;
+    if (isH) {
+        pasted.translate(
+            UnitValue((startInset + keep) - parseFloat(pb[0]), "px"),
+            UnitValue(0 - parseFloat(pb[1]), "px"));
+    } else {
+        pasted.translate(
+            UnitValue(0 - parseFloat(pb[0]), "px"),
+            UnitValue((startInset + keep) - parseFloat(pb[1]), "px"));
+    }
+
+    // 5. 合并图层
+    doc.mergeVisibleLayers();
+}
+
 // 构建导出文件名：路径式命名 + 安全清洗 + 短 hash（Fix #3, #4, #5）
 function buildExportName(psdPrefix, layerPath) {
     var segments = layerPath.split("/");
@@ -284,7 +412,7 @@ function buildExportName(psdPrefix, layerPath) {
 // ===========================
 // 导出单个图层/组为 PNG（Fix #2: 文件内容哈希去重, Fix #7: sourceBounds/trimmedSize, Fix #9: 裁切优化, Fix #10: 警告记录）
 // ===========================
-function savePNG(doc, layer, path, relPath, layerRelPath) {
+function savePNG(doc, layer, path, relPath, layerRelPath, s9) {
     try {
         var b = layer.bounds;
         var bL = parseFloat(b[0]), bT = parseFloat(b[1]);
@@ -327,10 +455,63 @@ function savePNG(doc, layer, path, relPath, layerRelPath) {
         var tw = Math.round(parseFloat(tmp.width));
         var th = Math.round(parseFloat(tmp.height));
 
-        // 去重指纹：在临时文档上用尺寸+直方图计算（保存前判断，避免 PNG 元数据差异）
-        var fp = tw + "x" + th;
+        // 九宫格裁切：保留四边 inset 像素 + 中间 SCALE9_KEEP_CENTER 像素
+        var preScale9Size = null;
+        if (s9 && s9.left + s9.right + SCALE9_KEEP_CENTER < tw
+              && s9.top + s9.bottom + SCALE9_KEEP_CENTER < th) {
+            preScale9Size = { width: tw, height: th };
+            try {
+                cropScale9(tmp, s9);
+                tw = Math.round(parseFloat(tmp.width));
+                th = Math.round(parseFloat(tmp.height));
+            } catch (e) {
+                addWarning(layerRelPath || relPath, "cropScale9",
+                    "九宫格裁切失败: " + (e.message || String(e)));
+                preScale9Size = null;
+            }
+        }
+
+        // 去重指纹
+        var fp;
         var hist = tmp.histogram;
-        for (var hi = 0; hi < 256; hi++) fp += "," + hist[hi];
+        if (s9) {
+            // 九宫格：用尺寸 + 四角区域颜色采样（AM 方式）生成指纹
+            // 避免抗锯齿亚像素差异导致相同图层样式的图无法去重
+            fp = tw + "x" + th + "|s9";
+            var sampler = tmp.colorSamplers;
+            // 清除已有采样点
+            while (sampler.length > 0) sampler[0].remove();
+            // 采样四角：各偏移 inset/2 处取色（远离抗锯齿边缘）
+            var sOff = Math.max(2, Math.min(Math.round(Math.min(s9.top, s9.left) / 2), tw - 1, th - 1));
+            var pts = [
+                [sOff, sOff],
+                [tw - sOff, sOff],
+                [sOff, th - sOff],
+                [tw - sOff, th - sOff]
+            ];
+            for (var pi = 0; pi < pts.length; pi++) {
+                var px = Math.max(0, Math.min(pts[pi][0], tw - 1));
+                var py = Math.max(0, Math.min(pts[pi][1], th - 1));
+                try {
+                    var cs = sampler.add([UnitValue(px, "px"), UnitValue(py, "px")]);
+                    var cr = Math.round(cs.color.rgb.red);
+                    var cg = Math.round(cs.color.rgb.green);
+                    var cb = Math.round(cs.color.rgb.blue);
+                    fp += "|" + cr + "," + cg + "," + cb;
+                    cs.remove();
+                } catch (e) {
+                    fp += "|?";
+                }
+            }
+            // 补充总像素量级（粗粒度）
+            var totalPx = 0;
+            for (var hi = 0; hi < 256; hi++) totalPx += hist[hi];
+            fp += "|" + Math.round(totalPx / 100);
+        } else {
+            // 普通图：精确直方图
+            fp = tw + "x" + th;
+            for (var hi = 0; hi < 256; hi++) fp += "," + hist[hi];
+        }
 
         if (dedupMap[fp]) {
             tmp.close(SaveOptions.DONOTSAVECHANGES);
@@ -339,7 +520,8 @@ function savePNG(doc, layer, path, relPath, layerRelPath) {
             var prev = dedupMap[fp];
             return { ok: true, width: tw, height: th, relPath: prev.relPath,
                 sourceBounds: { left: Math.round(bL), top: Math.round(bT), right: Math.round(bR), bottom: Math.round(bB) },
-                trimmedSize: { width: tw, height: th } };
+                trimmedSize: { width: tw, height: th },
+                preScale9Size: prev.preScale9Size || null };
         }
 
         var f = new File(path);
@@ -349,18 +531,19 @@ function savePNG(doc, layer, path, relPath, layerRelPath) {
         tmp.close(SaveOptions.DONOTSAVECHANGES);
         app.activeDocument = doc;
 
-        dedupMap[fp] = { relPath: relPath };
+        dedupMap[fp] = { relPath: relPath, preScale9Size: preScale9Size };
 
         return { ok: true, width: tw, height: th, relPath: relPath,
             sourceBounds: { left: Math.round(bL), top: Math.round(bT), right: Math.round(bR), bottom: Math.round(bB) },
-            trimmedSize: { width: tw, height: th } };
+            trimmedSize: { width: tw, height: th },
+            preScale9Size: preScale9Size };
     } catch (e) {
         addWarning(layerRelPath || relPath || "unknown", "savePNG", e.message || String(e));
         stat.errors++;
         try {
             for (var i = 0; i < app.documents.length; i++) {
                 var dn = app.documents[i].name;
-                if (dn === "__t__") {
+                if (dn === "__t__" || dn === "__s9end__") {
                     app.documents[i].close(SaveOptions.DONOTSAVECHANGES);
                 }
             }
@@ -691,18 +874,41 @@ function walk(doc, layers, parent, assetsDir, psdPrefix) {
                         stat.skip++;
                         continue;
                     }
-                    var fp2 = uniqueName(buildExportName(psdPrefix, rel));
-                    var res2 = savePNG(doc, ly, assetsDir + "/" + fp2 + ".png", fp2, rel);
+                    // 九宫格检测
+                    var s9 = parseScale9(nm);
+                    var exportLayerName = s9 ? stripScale9Suffix(nm) : nm;
+                    var exportRel = parent ? (parent + "/" + exportLayerName) : exportLayerName;
+                    var fp2 = uniqueName(buildExportName(psdPrefix, exportRel));
+                    // 只有显式指定参数时才传 s9 给 savePNG 做裁切
+                    var cropS9 = (s9 && s9.source === "name_params") ? s9 : null;
+                    var res2 = savePNG(doc, ly, assetsDir + "/" + fp2 + ".png", fp2, rel, cropS9);
                     if (res2) {
                         stat.png++;
                         var layerOpacity = 100;
                         try { layerOpacity = Math.round(ly.opacity); } catch (e) {}
-                        out.push({ name: nm, type: "png", options: { opacity: layerOpacity },
+                        var nodeOpts = { opacity: layerOpacity };
+                        var node = { name: nm, type: "png", options: nodeOpts,
                             offset: { left: bd.left, top: bd.top },
                             size: { width: res2.width, height: res2.height },
                             sourceBounds: res2.sourceBounds,
                             trimmedSize: res2.trimmedSize,
-                            relativePath: res2.relPath, children: [] });
+                            relativePath: res2.relPath, children: [] };
+                        if (s9) {
+                            stat.scale9Count++;
+                            // 自动推算模式：基于导出尺寸计算 insets
+                            if (s9.source === "name_flag" && res2.width > 0 && res2.height > 0) {
+                                var gi = guessScale9Insets(res2.width, res2.height);
+                                s9.top = gi.top; s9.right = gi.right;
+                                s9.bottom = gi.bottom; s9.left = gi.left;
+                            }
+                            node.sliceBorder = {
+                                top: s9.top, bottom: s9.bottom,
+                                left: s9.left, right: s9.right
+                            };
+                            // originalSize = PSD 图层原始尺寸（最可靠，不受裁切影响）
+                            node.originalSize = { width: bd.width, height: bd.height };
+                        }
+                        out.push(node);
                     } else { stat.skip++; }
                 }
             } else {
@@ -806,6 +1012,7 @@ function main() {
     if (stat.dedup > 0) m += "去重: " + stat.dedup + " 个重复PNG已合并引用\n";
     if (stat.raster > 0) m += "栅格化: " + stat.raster + " 个特殊图层（已自动恢复）\n";
     if (stat.clippingLayerCount > 0) m += "剪贴蒙版图层: " + stat.clippingLayerCount + " 个（可能失真）\n";
+    if (stat.scale9Count > 0) m += "九宫格图层: " + stat.scale9Count + " 个\n";
     if (stat.unsupportedCount > 0) m += "不支持的图层: " + stat.unsupportedCount + "\n";
     if (stat.skip > 0) m += "跳过: " + stat.skip + "\n";
     if (stat.warnings > 0) m += "警告: " + stat.warnings + " 条\n";

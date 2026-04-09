@@ -67,6 +67,11 @@ function createNode(parent, data, parentOffset, parentSize, spriteMap) {
         var sprite = node.addComponent('cc.Sprite');
         sprite.sizeMode = 2; // CUSTOM
 
+        // 九宫格处理：设置 SLICED 模式
+        if (data.sliceBorder) {
+            sprite.type = 1; // cc.Sprite.Type.SLICED
+        }
+
         // PNG 图层透明度
         var pngOpacity = (data.options && typeof data.options.opacity === 'number') ? data.options.opacity : 100;
         if (pngOpacity < 100) {
@@ -77,13 +82,35 @@ function createNode(parent, data, parentOffset, parentSize, spriteMap) {
         var sfUuid = spriteMap[data.relativePath];
         if (sfUuid) {
             try {
+                var sliceBorder = data.sliceBorder;
+                var s9OrigSize = data.originalSize;
                 var cached = cc.assetManager.assets.get(sfUuid);
                 if (cached) {
+                    if (sliceBorder) {
+                        cached.insetTop = sliceBorder.top;
+                        cached.insetBottom = sliceBorder.bottom;
+                        cached.insetLeft = sliceBorder.left;
+                        cached.insetRight = sliceBorder.right;
+                    }
                     sprite.spriteFrame = cached;
+                    // 九宫格：spriteFrame 赋值后再设 contentSize，防止被引擎覆盖
+                    if (sliceBorder && s9OrigSize) {
+                        transform.setContentSize(s9OrigSize.width, s9OrigSize.height);
+                    }
                 } else {
                     cc.assetManager.loadAny(sfUuid, function (err, asset) {
                         if (!err && asset && node.isValid && sprite.isValid) {
+                            if (sliceBorder) {
+                                asset.insetTop = sliceBorder.top;
+                                asset.insetBottom = sliceBorder.bottom;
+                                asset.insetLeft = sliceBorder.left;
+                                asset.insetRight = sliceBorder.right;
+                            }
                             sprite.spriteFrame = asset;
+                            // 异步加载路径同样在赋值后恢复原始尺寸
+                            if (sliceBorder && s9OrigSize) {
+                                transform.setContentSize(s9OrigSize.width, s9OrigSize.height);
+                            }
                         }
                     });
                 }

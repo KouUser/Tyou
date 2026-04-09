@@ -52,6 +52,60 @@ function resolveSpriteFrameUuids(atlasPath) {
 }
 
 /**
+ * 从 JSON 结构树中收集所有九宫格边距信息
+ */
+function collectSliceBorders(children) {
+    const map = {};
+    for (const child of children) {
+        if (child.type === 'png' && child.sliceBorder && child.relativePath) {
+            map[child.relativePath] = child.sliceBorder;
+        }
+        if (child.children && child.children.length > 0) {
+            Object.assign(map, collectSliceBorders(child.children));
+        }
+    }
+    return map;
+}
+
+/**
+ * 将九宫格边距写入 PNG 的 .meta 文件，使其持久化
+ */
+function applySliceBordersToMeta(atlasPath, sliceMap) {
+    if (Object.keys(sliceMap).length === 0) return 0;
+    const dirPath = path.join(Editor.Project.path, 'assets', atlasPath);
+    if (!fs.existsSync(dirPath)) return 0;
+    let count = 0;
+    for (const relPath in sliceMap) {
+        const border = sliceMap[relPath];
+        const metaPath = path.join(dirPath, relPath + '.png.meta');
+        if (!fs.existsSync(metaPath)) continue;
+        try {
+            const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+            if (!meta.subMetas) continue;
+            let modified = false;
+            for (const key in meta.subMetas) {
+                const sub = meta.subMetas[key];
+                if (sub.importer === 'sprite-frame' && sub.userData) {
+                    sub.userData.borderTop = border.top;
+                    sub.userData.borderBottom = border.bottom;
+                    sub.userData.borderLeft = border.left;
+                    sub.userData.borderRight = border.right;
+                    modified = true;
+                }
+            }
+            if (modified) {
+                fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+                count++;
+            }
+        } catch (e) {
+            console.warn('[PSD2CCC] 写入九宫格边距失败:', metaPath, e.message);
+        }
+    }
+    if (count > 0) console.log('[PSD2CCC] 已更新', count, '个 PNG meta 的九宫格边距');
+    return count;
+}
+
+/**
  * 从 PSD JSON 生成 UI 节点树
  */
 async function buildUIFromPSD(nodeInfo) {
@@ -101,6 +155,13 @@ async function buildUIFromPSD(nodeInfo) {
 
         // 3. 解析精灵帧 UUID
         const atlasPath = data.atlasPath || '';
+
+        // 应用九宫格边距到 meta 文件
+        if (atlasPath && data.children) {
+            const sliceMap = collectSliceBorders(data.children);
+            applySliceBordersToMeta(atlasPath, sliceMap);
+        }
+
         const spriteMap = atlasPath ? resolveSpriteFrameUuids(atlasPath) : {};
 
         // 检查资源是否已导入完成
